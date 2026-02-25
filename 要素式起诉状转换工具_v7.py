@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-要素式起诉状转换工具 v7.0 (GUI版)
+要素式起诉状转换工具 v8.0 (GUI版)
 传统起诉状 → 要素式起诉状 (Word docx 输出，精确还原范本格式)
 
 双击运行即可，自动安装依赖、弹出图形界面。
@@ -349,10 +349,12 @@ def extract_elements(text, type_id):
         if m:
             info['id_num'] = m.group(1).strip()
             info['id_type'] = '居民身份证'
-        m = re.search(r'住所[：:]\s*(.+?)(?:\n|$)', block)
+        # 住所/住所地/住址/地址
+        m = re.search(r'(?:住所地?|住址|地址)[：:]\s*(.+?)(?:\n|$)', block)
         if m:
             info['addr'] = m.group(1).strip()
-        m = re.search(r'联系电话[：:]\s*(.+?)(?:\n|$)', block)
+        # 联系电话/联系方式/电话
+        m = re.search(r'(?:联系电话|联系方式|电话)[：:]\s*(.+?)(?:\n|$)', block)
         if m:
             info['phone'] = m.group(1).strip()
         m = re.search(r'联系地址[：:]\s*(.+?)(?:\n|$)', block)
@@ -368,15 +370,20 @@ def extract_elements(text, type_id):
         m = re.search(r'法定代表人[：:]\s*(.+?)(?:\n|$)', block)
         if m:
             info['legal_rep'] = m.group(1).strip()
-        m = re.search(r'(?:住所|住址|地址)[：:]\s*(.+?)(?:\n|$)', block)
+        m = re.search(r'(?:住所地?|住址|地址)[：:]\s*(.+?)(?:\n|$)', block)
         if m:
             info['addr'] = m.group(1).strip()
         m = re.search(r'(?:统一(?:社会)?信用代码|信用代码)[：:]\s*(\w+)', block)
         if m:
             info['credit_code'] = m.group(1).strip()
-        m = re.search(r'(?:联系方式|联系电话|电话)[：:]\s*([\d\-]+)', block)
+        # 联系方式可能含律师信息（如"上海...律师事务所陈律师13162490323"），整行提取
+        m = re.search(r'(?:联系方式|联系电话|电话)[：:]\s*(.+?)(?:\n|$)', block)
         if m:
-            info['phone'] = m.group(1).strip()
+            info['contact_raw'] = m.group(1).strip()
+            # 提取纯数字电话
+            pm = re.search(r'(\d{11,})', info['contact_raw'])
+            if pm:
+                info['phone'] = pm.group(1)
         return info
 
     # ============================================================
@@ -483,8 +490,8 @@ def extract_elements(text, type_id):
     def is_lawyer_info(text_str):
         return any(kw in text_str for kw in LAWYER_KEYWORDS)
 
+    # 检查自然人原告的联系地址/电话
     for pinfo in plaintiffs_info:
-        # 检查联系地址是否含律师关键词
         contact_addr = pinfo.get('habitual', '')
         contact_phone = pinfo.get('phone', '')
 
@@ -492,34 +499,50 @@ def extract_elements(text, type_id):
         has_lawyer_phone = is_lawyer_info(contact_phone)
 
         if has_lawyer_addr or has_lawyer_phone:
-            # 将律师信息转移到agent_info
             if has_lawyer_addr:
                 agent_info['firm'] = contact_addr
-                pinfo.pop('habitual', None)  # 从原告中移除
-
+                pinfo.pop('habitual', None)
             if has_lawyer_phone:
-                # 提取律师姓名（如"13162490323（陈晓峰律师）"→ 姓名:陈晓峰）
                 lawyer_name_m = re.search(r'[（(]([^）)]*?律师)[）)]', contact_phone)
                 if lawyer_name_m:
-                    raw = lawyer_name_m.group(1)
-                    # "陈晓峰律师" → "陈晓峰"
-                    agent_info['name'] = raw.replace('律师', '').strip()
+                    agent_info['name'] = lawyer_name_m.group(1).replace('律师','').strip()
                     agent_info['job'] = '律师'
-                # 提取纯号码部分
                 phone_num = re.match(r'([\d\-]+)', contact_phone)
                 if phone_num:
                     agent_info['phone'] = phone_num.group(1)
-                pinfo.pop('phone', None)  # 从原告中移除
-
+                pinfo.pop('phone', None)
             agent_info['has'] = True
             agent_info['auth'] = '特别授权'
 
-    # 也检查原稿中是否有明确的委托代理人段落
+    # 检查法人原告的 contact_raw（如"上海...律师事务所陈晓峰律师13162490323"）
+    for pinfo in plaintiffs_info:
+        raw = pinfo.get('contact_raw', '')
+        if raw and is_lawyer_info(raw):
+            # 提取电话号码
+            pm = re.search(r'(\d{11,})', raw)
+            if pm:
+                agent_info['phone'] = pm.group(1)
+            # 提取律师姓名："陈晓峰律师" → 陈晓峰
+            nm = re.search(r'(?:所|院)\s*([\u4e00-\u9fff]{2,4})律师', raw)
+            if not nm:
+                nm = re.search(r'([\u4e00-\u9fff]{2,4})律师', raw)
+            if nm:
+                agent_info['name'] = nm.group(1)
+                agent_info['job'] = '律师'
+            # 律所地址：提取到"律师事务所"为止的部分
+            firm_m = re.search(r'(.+?律师事务所)', raw)
+            if firm_m:
+                agent_info['firm'] = firm_m.group(1)
+            pinfo.pop('contact_raw', None)
+            pinfo.pop('phone', None)
+            agent_info['has'] = True
+            agent_info['auth'] = '特别授权'
+
+    # 明确的委托代理人段落
     am = re.search(r'(?:委托(?:诉讼)?代理人|代理律师)[：:]\s*(.+?)(?:\n|$)', text)
     if am:
         agent_info['name'] = am.group(1).strip()
         agent_info['has'] = True
-    # 联系地址可能单独出现
     if not agent_info.get('firm'):
         fm = re.search(r'联系地址[：:]\s*(.+?)(?:\n|$)', text)
         if fm and is_lawyer_info(fm.group(1)):
@@ -535,16 +558,31 @@ def extract_elements(text, type_id):
     data['third_parties'] = [{'name': t.get('name',''), 'type': t.get('type','person')} for t in thirds_info]
 
     # ---- 诉讼请求 ----
-    m = re.search(r'(?:诉讼请求|请求贵院判令)[：:：]?\s*([\s\S]*?)(?=事实与理由)', text)
+    # 兼容多种格式："诉讼请求：""一、诉讼请求：""请求贵院判令"
+    # 截止词兼容："事实与理由""事实和理由""二、事实"
+    m = re.search(r'(?:(?:一、)?诉讼请求|请求贵院判令)[：:：]?\s*([\s\S]*?)(?=(?:二、)?事实[与和]理由)', text)
     if m:
         claims = m.group(1).strip()
+        # 清理：去掉可能混入的"案由：XXX"行
+        claims = re.sub(r'\n*案由[：:].*', '', claims).strip()
         data['claim_full'] = claims
-        amounts = re.findall(r'(?:人民币|共计|合计)\s*([\d,，.]+)\s*元', claims)
+        # 金额提取：兼容多种格式
+        amounts = re.findall(r'(?:人民币|共计|合计|诉请共计金额为[：:]?)\s*([\d,，.]+)\s*元', claims)
         if amounts:
             data['claim_total'] = amounts[-1].replace('，', ',') + '元'
+        if not amounts:
+            # "合计暂为人民币168,771元"
+            amounts2 = re.findall(r'(?:合计|共计).*?([\d,，.]+)\s*元', claims)
+            if amounts2:
+                data['claim_total'] = amounts2[-1].replace('，', ',') + '元'
+
+    # ---- 案由（可能在诉讼请求段落中或单独一行）----
+    am = re.search(r'案由[：:]\s*(.+?)(?:\n|$)', text)
+    if am:
+        data['case_type_name'] = am.group(1).strip()
 
     # ---- 事实与理由 ----
-    m = re.search(r'事实与理由[：:]\s*([\s\S]*?)(?=此致)', text)
+    m = re.search(r'(?:二、)?事实[与和]理由[：:]\s*([\s\S]*?)(?=此致)', text)
     if m:
         facts = m.group(1).strip()
         data['facts_basic'] = facts
@@ -573,9 +611,9 @@ def extract_elements(text, type_id):
             data['facts_period'] = period_m.group(1) + "起"
         pts = []
         if data.get('plaintiffs'):
-            pts.append(f"业主/建设单位：{data['plaintiffs'][0]}")
+            pts.append(f"原告：{data['plaintiffs'][0]}")
         if data.get('defendants'):
-            pts.append(f"物业服务人：{data['defendants'][0]['name']}")
+            pts.append(f"被告：{data['defendants'][0]['name']}")
         data['facts_parties'] = "\n".join(pts)
         fees = []
         for fm2 in re.finditer(r'(?:支出|支付|花费).+?([\d,，.]+)\s*元', facts):
@@ -583,12 +621,19 @@ def extract_elements(text, type_id):
         if fees:
             data['facts_unpaid'] = "、".join(fees)
 
+    # ---- 此致 / 法院 / 日期 ----
     m = re.search(r'此致\n(.+?法院)', text)
     if m:
         data['court'] = m.group(1).strip()
+    # 日期：多种格式
     m = re.search(r'日期[：:]\s*(.+)', text)
     if m:
         data['date'] = m.group(1).strip()
+    if not data.get('date'):
+        # "2024年12月23日" 或 "2023年 1月 12日" 独立行
+        m = re.search(r'(\d{4}年\s*\d{1,2}月\s*\d{1,2}日)\s*$', text, re.MULTILINE)
+        if m:
+            data['date'] = m.group(1).replace(' ', '')
 
     return data
 
